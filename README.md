@@ -15,7 +15,7 @@ Lắp Mạch
  - 4 Nút
  - RFID RC522
 
-![alt text](https://github.com/phuocpeter19/quetThe/blob/master/mach.png?raw=true "Hướng Dẫn")
+![alt text](https://github.com/phuocpeter19/quetThe/blob/9d383404860cbb9052a6e0778f2e1721a6e292be/mach.png?raw=true "Hướng Dẫn")
 
 Thư viện
 --------
