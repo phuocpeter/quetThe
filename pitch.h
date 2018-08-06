@@ -1,6 +1,6 @@
 /*************************************************
- * đây là các hằng số mở, nếu bạn dùng các biến trong này thì
- * mới tốn dung lợng bộ nhớ, nếu không thì không sao cả
+ * Public Constants
+ @version 20180805
  *************************************************/
 
 #define NOTE_B0  31

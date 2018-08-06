@@ -1,515 +1,476 @@
+/**
+File: quetThe.ino
+@version: 20180805
+*/
+
+// MARK: - Mot so cai dat tuy chinh duoc.
+
+// Thoi gian delay truoc khi xoa het du lieu trong EEPROM.
+// Default: 10000 (10s)
+#define DELAY_TRUOC_KHI_RESET 10000
+
+// Toc do giao tiep voi Serial.
+// Default: 115200
+#define SERIAL_BAUDRATE 115200
+
+// Toc do servo di chuyen (don vi millisecond).
+// Default: 5
+#define SERVO_MOVE_SPEED 5
+
+// Goc lon nhat de mo Servo.
+// Khi mo cua servo se chay tu goc 0 cho toi goc lon nhat.
+// Default: chua test.
+#define SERVO_MAX_OPEN 150
+
+// Toi da so the co the luu vao EEPROM.
+// Cong thuc tinh ((So byte cua EEPROM) / 4) - 1.
+// Vd cho Arduino Mega: ((4096 byte) / 4) - 1 = 1023.
+// Default: 50
+#define MAX_CARD 50
+
+// Pin nay se HIGH cung luc khi cua mo.
+#define NEW_PIN 3
+
+// Pin MFRC522
+#define RFID_RST_PIN 9
+#define RFID_MISO_PIN 50
+#define RFID_MOSI_PIN 51
+#define RFID_SCK_PIN 52
+#define RFID_SDA_PIN 53
+
+// Pin LED
+#define LED1_PIN 4
+#define LED2_PIN 2
+#define LED3_PIN 5
+
+// Pin Chuong bao
+#define ALARM_PIN 8
+
+// Pin nut cua
+#define DOOR_BTN_PIN 7
+// Pin nut khan cap
+#define EMERGENCY_BTN_PIN 10
+// Pin nut xoa du lieu
+#define CLEAR_MEM_BTN_PIN 11
+// Pin nut them the
+#define ADD_CARD_BTN_PIN 12
+// Pin bam chuong
+#define ALARM_ACTIVATE_BTN_PIN 13
+
+// Pin Servo
+#define SERVO_PIN 6
+
+// MARK: - Includes.
+
+#include <EEPROM.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <Servo.h>
-#include <SD.h>
 #include <MFRC522.h>
-#include <LiquidCrystal_I2C.h>
-#include <RTClib.h>
-
 #include "pitch.h"
 
-#define SS_PIN 6
-#define RST_PIN 9
-#define SERVO_ADDRESS 3
-#define LED1 4 // BAO LOI
-#define LED2 2 //hien THI MOTOR CHAY MO CUA -mau DUONG -MO COI
-#define LED3 5  //ktra pin - xanh la 
-#define DOOR_BTN 7
-#define BELL 8
-#define ESC_BTN 10
-
-RTC_DS3231 rtc;
-LiquidCrystal_I2C lcd(0x3f, 16, 4);
-MFRC522 mfrc522(SS_PIN, RST_PIN);
+MFRC522 mfrc522(RFID_SDA_PIN, RFID_RST_PIN);
 Servo servo;
 
-unsigned long uidDec, uidDecTemp;
-int posServo;
-const int chipSelect = 10;
-File logFile;
-char fileName[] = "quetThe.csv";
+/** Vi tri servo. */
+int servoPosition;
+/** Danh sach the trong bo nho dem. */
+byte cardList[MAX_CARD][4];
+/** The hien tai trong bo nho dem. */
+byte currentCard[4];
 
-void error(char *str)
-{
-  Serial.print("Loi: ");
-  Serial.println(str);
-  
-  // red LED indicates error
-  digitalWrite(LED1, HIGH);
-  digitalWrite(LED3, LOW);
-  digitalWrite(LED2, LOW);//TAT DEN XANH LA
-  while(1);
-}
+// MARK: - Arduino Life Cycle.
 
 void setup() {
   Wire.begin();
-  // Setup serial va lcd
-  Serial.begin(9600);
+  Serial.begin(SERIAL_BAUDRATE);
 
-  // Setup dong ho RTC
-  if (!rtc.begin()) {
-    Serial.println("Khong the ket noi voi RTC");
-    while (true);
-  }
-  
-  if (rtc.lostPower()) {
-    Serial.println("Dat thoi gian cho RTC");
-    // Dat thoi gian luc chep file nay
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    // January 21, 2014 at 3am you would call:
-    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-  }
-
-  // Setup dau doc the
   SPI.begin();
   mfrc522.PCD_Init();
 
-  // Dong servo
-  servo.attach(SERVO_ADDRESS);
-  for (posServo = 50; posServo >= 0; posServo--) {
-    servo.write(posServo);
-    delay(5);
+
+  // Chinh servo ve vi tri ban dau.
+  servo.attach(SERVO_PIN);
+  for (servoPosition = 50; servoPosition >= 0; servoPosition--) {
+    servo.write(servoPosition);
+    delay(SERVO_MOVE_SPEED);
   }
   servo.detach();
 
-  // Setup the SD
-  pinMode(chipSelect, OUTPUT);
-  if (!SD.begin(chipSelect)) {
-    error("Khong co the SD");
-  }
-  logFile = SD.open(fileName, FILE_WRITE);
-  if (!logFile) {
-    error("Khong the mo file");
-  }
-  //logFile.println("sep=,");
-  logFile.println("Ngay,Gio,Ten,MS,Truy Cap");
-  logFile.flush();
-  Serial.println("Da setup xong file SD");
-           
-  Serial.println("Hay dua the vao");
-  lcd.init();
-  lcd.backlight();
-  lcd.setCursor(0,0);
-  lcd.print("Hay dua the vao");
-  delay(5500);
-  lcd.noBacklight();
-  
-  pinMode(LED1, OUTPUT);
-  pinMode(LED2, OUTPUT);
-  pinMode(LED3, OUTPUT);
-  pinMode(BELL, OUTPUT);
-  pinMode(DOOR_BTN, INPUT);
+  setupPins();
+  // Tat het den LED
+  setAllLEDsToLow();
 
-  digitalWrite(LED3, HIGH);
-  digitalWrite(LED1, LOW);
-  digitalWrite(LED2, LOW);
-  digitalWrite(BELL, HIGH);
-  delay(800);
-  digitalWrite(BELL, LOW);
+  // Kiem tra xem nut xoa du lieu co LOW khong.
+  // Neu co thi vao che do reset EEPROM.
+  if (digitalRead(CLEAR_MEM_BTN_PIN) == LOW) {
+    enterResetMode();
+  }
+
+  // Truy xem co bao nhieu the dc luu trong EEPROM.
+  // Neu khong co the nao thi vao che do them the.
+  if (getEEPROMCardCount() == 0) {
+    Serial.println("CHU Y: Khong co the duoc luu trong EEPROM.");
+    runErrorLEDSequence();
+    enterAddCardMode();
+  }
+
+  // Load the tu EEPROM sang bo nho dem.
+  loadCardListFromEEPROM();
 }
 
 void loop() {
+  Serial.println("Vui long scan the...");
+  bool detected = false;
+  do {
+    // Kiem tra xem co nut nao dang nhan.
+    // Neu co thi thuc hien chuc nang cua nut do.
+    // Neu khong the scan the.
+    checkButtonsInput();
+    detected = scanCard();
+  } while (!detected);
 
-  kiemTraNutKhanCap();
-  // Kiem tra cạy cửa
-  kiemTraChuaDongCua();
-  
-   if ( ! mfrc522.PICC_IsNewCardPresent()) {
-    //Serial.println("Ko co the 1");
-    return;
-  }
-
-  if ( ! mfrc522.PICC_ReadCardSerial()) {
-    //Serial.println("Ko co the 2");
-    return;
-  }
-
-  uidDec = 0;
-  Serial.println("----------");
-
-  Serial.println("Da nhan duoc the");
-  for (byte i = 0; i < mfrc522.uid.size; i++) {
-    uidDecTemp = mfrc522.uid.uidByte[i];
-    uidDec = uidDec * 256 + uidDecTemp;
-  }
-
-  Serial.println(uidDec);
-  lcd.clear();
-  switch(uidDec) {
-     case 2664542720:
-      theAdmin("Duc-Admin"); //Copy phần này thay đổi số thẻ
-      break;
-    case 2533030730:
-      thePhu("Phuoc-19h00");
-      break;
-    case 1986395210:
-      thePhu("Chau-18h00");
-      break;
-    case 3680056064:
-      thePhu("Thuy-17h40");
-      break;
-    case 435693326:
-      thePhu("TMy-admin");
-      break;
-    default:
-      luuVaoSD(uidDec, "", false);
-      printTimeNow();
-      theSai();
-      break; 
-  }
-}
-
-void theAdmin(char user[]) {
-  Serial.println(user);
-  lcd.print(user);
-  printTimeNow();
-  luuVaoSD(uidDec, user, true);
-  theDung();
-}
-
-void thePhu(char user[]) {
-   Serial.println(user);
-      lcd.print(user);
-      if (!kiemTraTG()) {
-        Serial.println("K hieu luc");
-        lcd.backlight();
-        lcd.setCursor(3,1);
-        lcd.print(" K hieu luc");
-        lcd.setCursor(0,3);
-   //   lcd.print("6h00 - 18h00");
-    //  delay(1000);
-    //  lcd.clear();
-     // lcd.setCursor(0,1);
-     // lcd.print("Quay lai sau nha");
-    //  delay(1000);
-    //  lcd.clear();
-        
-    //lcd.print(" K hieu luc");
-        
-        printTimeNow();
-        luuVaoSD(uidDec, user, false);
-        digitalWrite(LED1, HIGH);
-        digitalWrite(LED2, HIGH);
-        digitalWrite(LED3, HIGH);
-        //digitalWrite(BELL, HIGH);
-        //delay(3000);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            
-        digitalWrite(LED1, LOW);
-        digitalWrite(LED2, LOW);
-        digitalWrite(BELL, LOW);
-        lcd.noBacklight();
-        return;
-      }
-       printTimeNow();
-      luuVaoSD(uidDec, user, true);
-      theDung();
-}
-
-void luuVaoSD(unsigned long uidDec, char user[], bool allowed) {
-  // Luu truy cap vao file trong the SD
-  // Thoi gian hien tai
-  DateTime now = rtc.now();
-  logFile.print(now.day());
-  logFile.print("/");
-  logFile.print(now.month());
-  logFile.print("/");
-  logFile.print(now.year());
-  logFile.print(",");
-  logFile.print(now.hour());
-  logFile.print(":");
-  logFile.print(now.minute());
-  logFile.print(":");
-  logFile.print(now.second());
-  logFile.print(",");
-  logFile.print(user);
-  logFile.print(",");
-  logFile.print(uidDec);
-  logFile.print(",");
-  if (allowed) {
-    logFile.println("Cho phep");
+  // Khi phat hien duoc the thi xem the co trong danh sach khong.
+  if (isCurrentCardPresentInList()) {
+    onCardAccept();
   } else {
-    logFile.println("Khong cho phep");
-  }
-  logFile.flush();
-}
-
-bool kiemTraTG() {
-  DateTime now = rtc.now();
-  return (now.hour() >= 6 && now.hour() < 18);
-}
-
-void theSai() {
-  // The khong co dung
-  // Bật LED đỏ (LED1)
-  // Tắt LED xanh (LED2)
-  // Còi hú
-  // Đợi 1 phút
-  lcd.clear();
-  lcd.setCursor(0,1);    
-  lcd.print("the sai  yeu cau");
-  lcd.print(" k su dung");
-  digitalWrite(LED1, HIGH);
-  digitalWrite(LED2, HIGH);
-  digitalWrite(LED3, LOW);
-
-  
-                    lcd.backlight();
-  
-  Serial.println("The nay khong co");
- // digitalWrite(BELL, HIGH);
- // delay(5000); //sua 60000 thành 30000, chờ test lâu quá.khi ra thực tế thay dổi sau
-  //digitalWrite(BELL, LOW);
-            digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(300);
-            digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-             digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(300);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(300);
-            digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(300);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(200);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);  
-              
-                    lcd.noBacklight();
-  
-  Serial.println("================================================");
-}
-
-void theDung() {
-  // The co dung
-  // Bật LED xanh (LED2)
-  // Tắt LED đỏ (LED1)
-  // Mở ổ khoá
-  // Còi hú
-  // Đóng ổ khoá
-  // Đợi 5s
-              lcd.backlight();
-  digitalWrite(LED1, LOW);
-  digitalWrite(LED2, HIGH);
-  digitalWrite(LED3, LOW); //MOI THEM
-
-  servo.attach(SERVO_ADDRESS);
-  // Mo cua
-  for (posServo = 0; posServo <= 157; posServo++) { //thay doi 180 thanh 135
-   servo.write(posServo);
-    delay(5);
-  }
-
-  Serial.println("The nay dung");
-  choiNhac();
-
-  // Dong cua
-  for (posServo = 135; posServo >=0; posServo--) { //thay doi 180 thanh 135 theo hàng trên nha
-    servo.write(posServo);
-    delay(5);
-    
-                    lcd.noBacklight();
-  }
-  servo.detach();
-  
-  digitalWrite(LED2, HIGH);
-  digitalWrite(LED1, HIGH);
-  digitalWrite(LED3, HIGH);
-  digitalWrite(BELL, LOW);
-
-  kiemTraChuaDongCua();
-  
-  Serial.println("================================================");
-}
-
-void kiemTraNutKhanCap() {
-  int doorStatus = digitalRead(ESC_BTN);
-  while (doorStatus == LOW) {
-    lcd.backlight();
-    lcd.clear();
-    lcd.print("Mo Khan Cap");
-    theDung();
+    onCardDeny();
   }
 }
 
-void kiemTraChuaDongCua() {
-  int doorStatus = digitalRead(DOOR_BTN);
-  while (doorStatus == LOW) {
-                  
-                    lcd.backlight();
-    Serial.println("Chua dong cua");
-    lcd.clear();
-    lcd.print("Chua dong cua");
-    digitalWrite(LED3, LOW);//DOI 1 THANH 3
-    digitalWrite(LED1, HIGH); //MOI THEM
-    digitalWrite(LED2, LOW);//MOI THEM
-    digitalWrite(BELL, HIGH);
+/** Setup cac pin. */
+void setupPins() {
+  // Outputs.
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  pinMode(LED3_PIN, OUTPUT);
+  pinMode(ALARM_PIN, OUTPUT);
+  pinMode(NEW_PIN, OUTPUT);
+  // Inputs.
+  pinMode(DOOR_BTN_PIN, INPUT_PULLUP);
+  pinMode(EMERGENCY_BTN_PIN, INPUT_PULLUP);
+  pinMode(CLEAR_MEM_BTN_PIN, INPUT_PULLUP);
+  pinMode(ADD_CARD_BTN_PIN, INPUT_PULLUP);
+  pinMode(ALARM_ACTIVATE_BTN_PIN, INPUT_PULLUP);
+}
+
+// MARK: - Operating Modes.
+
+/**
+Chuyen vao che do reset.
+Thiet bi se mo den LED va delay 1 khoang
+thoi gian theo DELAY_TRUOC_KHI_RESET roi
+xoa het du lieu trong EEPROM.
+*/
+void enterResetMode() {
+  Serial.println("----- RESET MODE -----");
+  Serial.print("CHU Y: du lieu trong EEPROM bi xoa sau ");
+  Serial.print(DELAY_TRUOC_KHI_RESET / 1000);
+  Serial.println("s.");
+  Serial.println("Tat nguon may truoc khi den LED tat de huy qua trinh xoa.");
+  digitalWrite(LED1_PIN, HIGH);
+  digitalWrite(LED2_PIN, HIGH);
+  delay(DELAY_TRUOC_KHI_RESET);
+  setAllLEDsToLow();
+  Serial.println("Dang xoa du lieu EEPROM.");
+  for (unsigned int i = 0; i < EEPROM.length(); i++) {
+    EEPROM.write(i, 0);
+    Serial.print(".");
+  }
+  Serial.println("Xong");
+  runSuccessLEDSequence();
+}
+
+/**
+Chuyen vao che do them the moi.
+Thiet bi se scan the va luu vao
+EEPROM.
+*/
+void enterAddCardMode() {
+  Serial.println("------ ADD CARD MODE ------");
+  if (getEEPROMCardCount() >= MAX_CARD) {
+    runErrorLEDSequence();
+    Serial.println("EEPROM het cho luu them the moi.");
+    Serial.print("Toi da: ");
+    Serial.println(MAX_CARD);
+    return;
+  }
+  digitalWrite(LED3_PIN, HIGH);
+  Serial.println("Scan the de them vao EEPROM.");
+  bool detected = false;
+  do {
+    detected = scanCard();
+  } while (!detected);
+  saveCurrentCardToEEPROM();
+}
+
+// MARK: - LED Sequence Functions.
+
+/** Tat het tat ca den LED. */
+void setAllLEDsToLow() {
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(LED2_PIN, LOW);
+  digitalWrite(LED3_PIN, LOW);
+}
+
+/** Bat het tat ca den LED. */
+void setAllLEDsToHIGH() {
+  digitalWrite(LED1_PIN, HIGH);
+  digitalWrite(LED2_PIN, HIGH);
+  digitalWrite(LED3_PIN, HIGH);
+}
+
+/** Bat den LED va chuong de thong bao thanh cong. */
+void runSuccessLEDSequence() {
+  setAllLEDsToLow();
+  delay(3);
+  digitalWrite(LED2_PIN, HIGH);
+  for (int i = 1; i <= 2; i++) {
+    digitalWrite(ALARM_PIN, HIGH);
     delay(250);
-    digitalWrite(BELL, LOW);
-    doorStatus = digitalRead(DOOR_BTN);
+    digitalWrite(ALARM_PIN, LOW);
   }
-  digitalWrite(BELL, LOW);
-  digitalWrite(LED1, LOW);
-  digitalWrite(LED2, LOW);
-  digitalWrite(LED3, HIGH);
-  
-                    lcd.noBacklight();
+  digitalWrite(LED2_PIN, LOW);
 }
 
-/** In thoi gian hien tai
- *  vao Serial va LCD
- */
-void printTimeNow() {
-  
-  DateTime now = rtc.now();
-  
-  Serial.print("Thoi Gian hien tai: ");
-  Serial.print(now.hour(), DEC);
-  Serial.print(":");
-  Serial.print(now.minute(), DEC);
-  Serial.print(":");
-  Serial.println(now.second(), DEC);
-  
-  Serial.print("Ngay thang: ");
-  Serial.print(now.day(), DEC);
-  Serial.print("/");
-  Serial.print(now.month(), DEC);
-  Serial.print("/");
-  Serial.println(now.year(), DEC);
-
-  lcd.setCursor(0,1);
-  lcd.print(now.hour());
-  lcd.print(":");
-  lcd.print(now.minute());
-  lcd.print(":");
-  lcd.print(now.second());
-  lcd.print("   ");
-  lcd.print(now.day());
-  lcd.print("/");
-  lcd.print(now.month());
-  //lcd.print("/");
-  //lcd.print(now.year());
+/** Bat den LED va chuong de thong bao that bai. */
+void runErrorLEDSequence() {
+  setAllLEDsToLow();
+  delay(3);
+  digitalWrite(LED1_PIN, HIGH);
+  digitalWrite(ALARM_PIN, HIGH);
+  delay(1000);
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(ALARM_PIN, LOW);
 }
 
-void choiNhac() {
-  int notes[] = {NOTE_C4, NOTE_G3,NOTE_G3, NOTE_A3, NOTE_G3,0, NOTE_B3, NOTE_C4};
-  int beats[] = {4, 8, 8, 4, 4, 4, 4, 4};
+// MARK: - EEPROM Functions.
 
-  for (int i = 0; i < 1; i++) {
-    for (int thisNote = 0; thisNote < 8; thisNote++) {
+/**
+Truy xem co bao nhieu the duoc luu trong EEPROM.
+@return so the duoc luu.
+*/
+byte getEEPROMCardCount() {
+  return EEPROM.read(0);
+}
 
-    // bây giờ ta đặt một nốt nhạc là 1 giây = 1000 mili giây
-    // thì ta chia cho các thành phần noteDurations thì sẽ
-    // được thời gian chơi các nốt nhạc
-    // ví dụ: 4 => 1000/4; 8 ==> 1000/8 
-    int noteDuration = 1000/beats[thisNote];
-    tone(BELL, notes[thisNote],noteDuration);
+/** Tang so luong the duoc luu them 1. */
+void incrementEEPROMCardCount() {
+  EEPROM.write(0, getEEPROMCardCount() + 1);
+}
 
-    // để phân biệt các nốt nhạc hãy delay giữa các nốt nhạc
-    // một khoảng thời gian vừa phải. Ví dụ sau đây thực hiện tốt
-    // điều đó: Ta sẽ cộng 30% và thời lượng của một nốt
-    int pauseBetweenNotes = noteDuration * 1.30;
-    delay(pauseBetweenNotes);
-    
-    //Ngừng phát nhạc để sau đó chơi nhạc tiếp!
-    noTone(BELL);
+/** Luu the hien tai vao EEPROM. */
+void saveCurrentCardToEEPROM() {
+  Serial.print("Dang luu the vao EEPROM.");
+  int startAddress = getEEPROMCardCount() * 4 + 1;
+  int endAddress = startAddress + 4;
+  int index = 0;
+  for (int address = startAddress; address < endAddress; address++) {
+    EEPROM.write(address, currentCard[index++]);
+    Serial.print(".");
+  }
+  incrementEEPROMCardCount();
+  Serial.println("Xong");
+  runSuccessLEDSequence();
+}
+
+/**
+Load the tu EEPROM vao bo nho dem, dong
+thoi in the ma so the ra Serial.
+*/
+void loadCardListFromEEPROM() {
+  int cardCount = getEEPROMCardCount();
+  Serial.println("----- DANH SACH THE ------");
+  for (int cardID = 0; cardID < cardCount; cardID++) {
+    Serial.print("THE ");
+    Serial.print(cardID + 1);
+    Serial.print(": ");
+    for (int i = 0; i < 4; i++) {
+      byte value = EEPROM.read(cardID * 4 + (i + 1));
+      cardList[cardID][i] = value;
+      Serial.print(value, HEX);
     }
-            digitalWrite(BELL, HIGH);
-            delay(800);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(700);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(600);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(550);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(530);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(520);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(500);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(400);
-             digitalWrite(BELL, HIGH);
-            delay(300);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(250);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(200);
-             digitalWrite(BELL, HIGH);
-            delay(180);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(160);
-            digitalWrite(BELL, LOW);       
-            delay(100);
-            digitalWrite(BELL, HIGH);
-            delay(500);
-            digitalWrite(BELL, LOW);
+    Serial.println("");
   }
-  Serial.println("Choi nhac xong");
+}
+
+/**
+Kiem tra xem the hien tai co nam trong danh sach.
+@return true neu the hien tai co nam trong danh sach.
+*/
+bool isCurrentCardPresentInList() {
+  for (int i = 0; i < getEEPROMCardCount(); i++) {
+    byte b0 = cardList[i][0];
+    byte b1 = cardList[i][1];
+    byte b2 = cardList[i][2];
+    byte b3 = cardList[i][3];
+
+    if (b0 == currentCard[0] &&
+        b1 == currentCard[1] &&
+        b2 == currentCard[2] &&
+        b3 == currentCard[3]) {
+      return true;
+    }
+
+  }
+  return false;
+}
+
+// MARK: - MFRC522 Functions.
+
+/**
+Scan the.
+@return true neu MFRC522 do duoc ma so the.
+*/
+bool scanCard() {
+  setAllLEDsToLow();
+  digitalWrite(LED3_PIN, HIGH);
+  if (!mfrc522.PICC_IsNewCardPresent()) {
+    Serial.println("No card present");
+    return false; 
+  }
+  if (!mfrc522.PICC_ReadCardSerial()) { 
+    Serial.println("Cannot read");
+    return false; 
+  }
+  Serial.print("The da scan: ");
+  for (size_t i = 0; i < 4; i++) {
+    currentCard[i] = mfrc522.uid.uidByte[i];
+    Serial.print(currentCard[i], HEX);
+  }
+  Serial.println("");
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+  runSuccessLEDSequence();
+  return true;
+}
+
+// MARK: - Buttons Checking.
+
+/**
+Kiem tra xem nut khan cap, nut them the va nut chuong co LOW khong.
+Kiem tra xem cua co dang dong khong.
+*/
+void checkButtonsInput() {
+  // Neu nut khan cap LOW thi mo cua.
+  if (digitalRead(EMERGENCY_BTN_PIN) == LOW) {
+    Serial.println("----- EMERGENCY MODE ------");
+    onCardAccept();
+  }
+
+  // Neu nut cua dang HIGH thi bat chuong bao den khi
+  // nao dong cua thi thoi.
+  secureDoor();
+
+  // Neu nut them the LOW thi vao che do them the.
+  if (digitalRead(ADD_CARD_BTN_PIN) == LOW) {
+    setAllLEDsToHIGH();
+    enterAddCardMode();
+    loadCardListFromEEPROM();
+  }
+
+  // Neu nut chuong LOW thi choi nhac nhung khong mo cua.
+  if (digitalRead(ALARM_ACTIVATE_BTN_PIN) == LOW) {
+    playOpeningTunes();
+  }
+  
+}
+
+/** 
+Neu nut cua dang HIGH thi bat chuong bao den khi
+nao dong cua thi thoi.
+*/
+void secureDoor() {
+  int doorStatus = digitalRead(DOOR_BTN_PIN);
+  while (doorStatus == HIGH) {
+    Serial.println("Chua dong cua.");
+    setAllLEDsToLow();
+    digitalWrite(LED1_PIN, HIGH);
+    digitalWrite(ALARM_PIN, HIGH);
+    delay(250);
+    digitalWrite(ALARM_PIN, LOW);
+    doorStatus = digitalRead(DOOR_BTN_PIN);
+  }
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(LED3_PIN, HIGH);
+}
+
+// MARK: - Door open and close behaviour.
+
+/** 
+Thuc hien qua tring mo cua. 
+NEW_PIN se duoc bat HIGH trong qua trinh mo cua.
+*/
+void onCardAccept() {
+  Serial.println("The duoc chap nhan.");
+  setAllLEDsToLow();
+  digitalWrite(LED2_PIN, HIGH);
+
+  digitalWrite(NEW_PIN, HIGH);
+  servo.attach(SERVO_PIN);
+  Serial.print("Dang mo cua.");
+  for (servoPosition = 0; servoPosition <= SERVO_MAX_OPEN; servoPosition++) {
+    servo.write(servoPosition);
+    Serial.print(".");
+    delay(SERVO_MOVE_SPEED);
+  }
+  Serial.println("Xong");
+
+  playOpeningTunes();
+
+  Serial.print("Dang dong cua.");
+  for (servoPosition = SERVO_MAX_OPEN; servoPosition >= 0; servoPosition--) {
+    servo.write(servoPosition);
+    Serial.print(".");
+    delay(SERVO_MOVE_SPEED);
+  }
+  Serial.println("Xong");
+  servo.detach();
+  digitalWrite(NEW_PIN, LOW);
+  setAllLEDsToHIGH();
+}
+
+/** Thuc hien qua trinh tu choi the khong mo cua. */
+void onCardDeny() {
+  Serial.println("The bi tu choi.");
+  setAllLEDsToLow();
+  digitalWrite(LED1_PIN, HIGH);
+  playDenyTunes();
+}
+
+// MARK: - Tunes
+
+/** Nhac luc mo cua. */
+void playOpeningTunes() {
+  int melody[] = {
+    NOTE_C3, NOTE_E3, NOTE_G3, NOTE_C4, NOTE_E4, NOTE_G4, NOTE_C5
+  };
+  int duration[] = {
+    4, 4, 4, 4, 4, 4, 4
+  };
+
+  for (int note = 0; note < 7; note++) {
+    int noteDuration = 1000 / duration[note];
+    tone(ALARM_PIN, melody[note], noteDuration);
+    delay(noteDuration * 1.30);
+    noTone(ALARM_PIN);
+  }
+}
+
+/** Nhac luc tu choi the khong mo cua. */
+void playDenyTunes() {
+  int melody[] = {
+    NOTE_A3, NOTE_GS3, NOTE_A3, NOTE_GS3, NOTE_A3, NOTE_DS3, NOTE_D3
+  };
+  int duration[] = {
+    4, 8, 4, 8, 4, 4, 4
+  };
+
+  for (int note = 0; note < 7; note++) {
+    int noteDuration = 1000 / duration[note];
+    tone(ALARM_PIN, melody[note], noteDuration);
+    delay(noteDuration * 1.30);
+    noTone(ALARM_PIN);
+  }
 }
 
